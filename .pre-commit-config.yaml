@@ -1,0 +1,73 @@
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-json
+      - id: check-toml
+      - id: check-yaml
+      - id: no-commit-to-branch
+        args: ["--branch", "staging", "--branch", "master"]
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: requirements-txt-fixer
+
+# Apply Black python formatting - Also is applied within Jupyter notebooks
+# Using this mirror lets us use mypyc-compiled black, which is about 2x faster
+  - repo: https://github.com/psf/black-pre-commit-mirror
+    rev: 24.4.2
+    hooks:
+      - id: black-jupyter
+
+# Apply flake8
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.0.0
+    hooks:
+      - id: flake8
+        # E203 - ":" with whitespace before it
+        # E501 - line length (black will handle this; what it can't will be ingored)
+        # P103 - disallows "{}" in strings
+        args: [ "-j8", "--ignore=E203,E501,P103" ]
+        additional_dependencies:
+          - flake8-broken-line
+            # Check for breaking up lines with "\" when """ or () is better
+            # https://pypi.org/project/flake8-broken-line/
+          - flake8-bugbear
+            # Find likely bugs or design problems
+            # https://pypi.org/project/flake8-bugbear/
+          - flake8-comprehensions
+            # Smarter checks whenever comprehensions are used.
+            # https://pypi.org/project/flake8-comprehensions/
+          - flake8-debugger
+            # Ensure no pdb/idb or interactive shells remain
+            # https://pypi.org/project/flake8-debugger/
+          - flake8-string-format
+          # Checks number, type, indexes and keywords when string formatting is used
+          # https://pypi.org/project/flake8-string-format/
+# Sort imports correctly
+  - repo: https://github.com/pycqa/isort # The offical support for pre-commit
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: ["--profile", "black"] # Solves conflicts between black and isort
+
+# Enforce good type-hinting
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.9.0
+    hooks:
+      - id: mypy
+        # --strict: Enable ooptinal checking flags, like "missing return type", "incorrect return type"
+        # Ignore missing imports, such as airflow which is not in requirements.txt
+        args: [--strict, --ignore-missing-imports]
+
+# Clean up jupyter notebook cells, so plots, printouts and other misc. state info
+#  doesn't make it into, and bloat, the Git repo
+  - repo: https://github.com/srstevenson/nb-clean
+    rev: 3.2.0
+    hooks:
+      - id: nb-clean
