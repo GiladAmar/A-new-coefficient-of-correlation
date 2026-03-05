@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xicor"
+version = "0.1.0"
+description = "Python implementation of the XI correlation coefficient (Chatterjee, 2021)"
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.10"
+keywords = ["statistics", "correlation", "xi", "rank", "nonparametric"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+dependencies = [
+    "numpy>=1.21",
+    "scipy>=1.7",
+    "joblib>=1.0",
+]
+
+[project.optional-dependencies]
+# pip install xicor[spark]
+spark = ["pyspark>=3.2", "pandas>=1.3"]
+# pip install xicor[dev]  (for contributors)
+dev = [
+    "pytest>=7.0",
+    "pandas>=1.3",
+    "jupyter>=1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xicor"]
+
+# ---------------------------------------------------------------------------
+# uv: dev dependency group (uv add --dev <pkg> writes here)
+# ---------------------------------------------------------------------------
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "pandas>=1.3",
+    "jupyter>=1.0",
+]
