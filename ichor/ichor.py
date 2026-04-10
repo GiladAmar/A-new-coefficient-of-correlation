@@ -2,18 +2,25 @@
 """
 Ichor – Fluid Dynamics Game  (Mac port, GPU-accelerated)
 
-Clean-room reimplementation of the original Flash game by Soylent Software
-published on fun-motion.com.
+Clean-room reimplementation of the original Windows game by Soylent Software
+(Namaste Reid + Luke Palmer), published on fun-motion.com in November 2006.
+
+The original is a 777 KB Windows installer (software-rendered CPU graphics).
+This Mac port upgrades rendering to GPU via OpenGL 3.3 Core → Metal on Apple
+Silicon, while keeping the simulation on CPU with numpy (matching the original
+architecture: heavy CPU fluid sim, thin display layer).
 
 Physics: Jos Stam, "Real-Time Fluid Dynamics for Games", GDC 2003
          with density-gradient driven Gaussian noise (as documented).
 
 Controls
 --------
-  Menu  :  1 = Single Player (mouse)   2 = Duel (WASD vs arrow keys)
-  Single:  Move mouse to steer         ESC = quit
-  Duel  :  P1 WASD  P2 arrow keys      ESC = quit
-  After game: SPACE = restart          ESC = quit
+  Menu    :  1 = Single Player (mouse)   2 = Duel (WASD vs arrow keys)
+             3 = Duel with joysticks (if connected)
+  Single  :  Move mouse to steer                   ESC = menu
+  Duel    :  P1 WASD  /  P2 arrow keys              ESC = menu
+  Joystick:  Left stick to steer (either player)    ESC = menu
+  After game: SPACE = play again                    ESC = menu
 """
 
 import sys, math, random, time
@@ -76,9 +83,11 @@ void main() {
     float d0 = max(texture(u_d0, v_uv).r, 0.0);
     float d1 = max(texture(u_d1, v_uv).r, 0.0);
 
-    vec3 c0 = vec3(1.00, 0.18, 0.04);   // player 0 : red-orange
-    vec3 c1 = vec3(0.04, 0.48, 1.00);   // player 1 : blue
-    vec3 bg = vec3(0.018, 0.018, 0.065);
+    // "Ichor" = golden fluid of the gods (player 0: amber-gold)
+    // Player 1: deep blue-purple (opposing ichor / mortal blood)
+    vec3 c0 = vec3(1.00, 0.65, 0.02);   // player 0 : amber-gold
+    vec3 c1 = vec3(0.15, 0.10, 0.90);   // player 1 : indigo-blue
+    vec3 bg = vec3(0.010, 0.008, 0.045);
 
     vec3 col = bg;
     col += c0 * pow(d0, 0.55) * 2.9 + c0 * d0 * d0 * 5.5;
@@ -430,23 +439,34 @@ def make_text_surface(lines, font_big, font_small, p0_col, p1_col):
 STATE_MENU     = 'menu'
 STATE_SINGLE   = 'single'
 STATE_DUEL     = 'duel'
+STATE_JOY      = 'joy'
 STATE_GAMEOVER = 'gameover'
 
 
 class Game:
-    P0_COL = (255, 80,  20,  230)
-    P1_COL = (30,  130, 255, 230)
+    # Match the amber-gold / indigo-blue shader colours
+    P0_COL = (255, 175,  10, 230)   # amber-gold
+    P1_COL = ( 60,  40, 240, 230)   # indigo-blue
     WHITE  = (240, 240, 240, 230)
     GREY   = (160, 160, 160, 200)
 
     def __init__(self):
-        self.state   = STATE_MENU
-        self.fluid   = Fluid()
-        self.players = self._spawn_players()
-        self.winner  = -1
-        self.flash   = 0.0
+        self.state    = STATE_MENU
+        self.fluid    = Fluid()
+        self.players  = self._spawn_players()
+        self.winner   = -1
+        self.flash    = 0.0
         self.over_timer = 0.0
-        self.clock   = pygame.time.Clock()
+        self.score    = [0, 0]   # persistent across rounds
+        self.clock    = pygame.time.Clock()
+
+        # Joystick initialisation
+        pygame.joystick.init()
+        self.joys = []
+        for i in range(min(pygame.joystick.get_count(), 2)):
+            j = pygame.joystick.Joystick(i)
+            j.init()
+            self.joys.append(j)
 
     def _spawn_players(self):
         p0 = Player(0, W * 0.28, H * 0.50)
@@ -454,6 +474,7 @@ class Game:
         return [p0, p1]
 
     def reset(self, mode):
+        self._last_mode = mode
         self.fluid   = Fluid()
         self.players = self._spawn_players()
         if mode == STATE_SINGLE:
@@ -463,6 +484,10 @@ class Game:
         self.over_timer = 0.0
         self.state     = mode
 
+    def _reset_keep_score(self):
+        """Restart the same mode, keeping the running score."""
+        self.reset(self.state if self.state != STATE_GAMEOVER else STATE_MENU)
+
     # ── input handling ─────────────────────────────────────────────────────────
     def handle_events(self):
         for ev in pygame.event.get():
@@ -470,29 +495,45 @@ class Game:
                 return False
             if ev.type == KEYDOWN:
                 if ev.key == K_ESCAPE:
-                    return False
+                    if self.state in (STATE_SINGLE, STATE_DUEL, STATE_JOY):
+                        self.state = STATE_MENU
+                    else:
+                        return False
                 if self.state == STATE_MENU:
                     if ev.key == K_1:
                         self.reset(STATE_SINGLE)
                     elif ev.key == K_2:
                         self.reset(STATE_DUEL)
+                    elif ev.key == K_3 and self.joys:
+                        self.reset(STATE_JOY)
                 elif self.state == STATE_GAMEOVER:
                     if ev.key == K_SPACE:
-                        self.state = STATE_MENU
+                        # Restart in same mode; score persists
+                        prev = getattr(self, '_last_mode', STATE_SINGLE)
+                        self.reset(prev)
         return True
 
-    def _player_input(self, dt):
-        """Return (dx,dy) per player from keyboard/mouse."""
-        keys = pygame.key.get_pressed()
+    def _joy_axis(self, joy_idx, dead=0.15):
+        """Read left-stick axes from joystick, apply dead-zone."""
+        if joy_idx >= len(self.joys):
+            return 0.0, 0.0
+        j = self.joys[joy_idx]
+        try:
+            ax = j.get_axis(0)
+            ay = j.get_axis(1)
+        except Exception:
+            return 0.0, 0.0
+        if abs(ax) < dead: ax = 0.0
+        if abs(ay) < dead: ay = 0.0
+        return ax, ay
 
-        # Player 0: WASD
+    def _player_input(self, dt):
+        """Return (dx,dy) per player from keyboard."""
+        keys = pygame.key.get_pressed()
         dx0 = (keys[K_d] - keys[K_a]) * 1.0
         dy0 = (keys[K_s] - keys[K_w]) * 1.0
-
-        # Player 1: arrow keys
         dx1 = (keys[K_RIGHT] - keys[K_LEFT]) * 1.0
         dy1 = (keys[K_DOWN]  - keys[K_UP])   * 1.0
-
         return (dx0, dy0), (dx1, dy1)
 
     def _mouse_input(self):
@@ -530,7 +571,15 @@ class Game:
         if self.state == STATE_SINGLE:
             dx0, dy0 = self._mouse_input()
             p0.move(dx0, dy0, dt, self.fluid)
-            p1.update(p0, self.fluid, dt)   # AI
+            p1.update(p0, self.fluid, dt)           # AI
+        elif self.state == STATE_JOY:
+            dx0, dy0 = self._joy_axis(0)
+            dx1, dy1 = self._joy_axis(1)
+            # Fall back to keyboard if no second joystick
+            if not dx1 and not dy1 and len(self.joys) < 2:
+                (_, _), (dx1, dy1) = self._player_input(dt)
+            p0.move(dx0, dy0, dt, self.fluid)
+            p1.move(dx1, dy1, dt, self.fluid)
         else:
             (dx0, dy0), (dx1, dy1) = self._player_input(dt)
             p0.move(dx0, dy0, dt, self.fluid)
@@ -543,6 +592,7 @@ class Game:
         p1_lost = p1.is_engulfed(self.fluid)
         if p0_lost or p1_lost:
             self.winner = 1 if p0_lost else 0
+            self.score[self.winner] += 1
             self.over_timer = 4.0
             self.state = STATE_GAMEOVER
 
@@ -555,11 +605,14 @@ class Game:
 
         # Overlay text
         if self.state == STATE_MENU:
+            joy_line = ("3  –  Joystick duel", False, self.GREY) if self.joys \
+                       else ("          (plug in joystick for mode 3)", False, self.GREY)
             surf = make_text_surface([
-                ("ICHOR",                       True,  self.WHITE),
-                ("1  –  Single Player  (mouse)", False, self.P0_COL),
-                ("2  –  Duel   (WASD  vs  ↑↓←→)", False, self.P1_COL),
-                ("",                            False, self.GREY),
+                ("ICHOR",                           True,  self.WHITE),
+                ("1  –  Single Player  (mouse)",    False, self.P0_COL),
+                ("2  –  Duel   (WASD  vs  ↑↓←→)",  False, self.P1_COL),
+                joy_line,
+                ("",                                False, self.GREY),
                 ("Engulf your opponent in your colour", False, self.GREY),
             ], font_big, font_small, self.P0_COL, self.P1_COL)
             renderer.render_overlay(surf)
@@ -567,15 +620,15 @@ class Game:
         elif self.state == STATE_GAMEOVER:
             name = "PLAYER 1" if self.winner == 0 else "PLAYER 2"
             col  = self.P0_COL if self.winner == 0 else self.P1_COL
+            score_str = f"{self.score[0]}  –  {self.score[1]}"
             surf = make_text_surface([
                 (f"{name}  WINS",  True,  col),
-                ("SPACE  –  menu", False, self.GREY),
+                (score_str,        False, self.WHITE),
+                ("SPACE  –  play again     ESC  –  menu", False, self.GREY),
             ], font_big, font_small, self.P0_COL, self.P1_COL)
             renderer.render_overlay(surf)
 
-        elif self.state == STATE_SINGLE:
-            # Subtle HUD: show controls reminder for first few seconds
-            pass
+        # During play: no overlay (keeps screen clean, matches original style)
 
         pygame.display.flip()
 
